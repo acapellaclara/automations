@@ -6,124 +6,98 @@ import os
 
 class UserStatusProcessor:
     def __init__(self, log_level: str = "INFO"):
-        """
-        Inicializa el procesador de status de usuarios.
-        
-        Args:
-            log_level: Nivel de logging (default: "INFO")
-        """
-        # Configurar logging
         self.setup_logging(log_level)
         self.logger = logging.getLogger(__name__)
     
     def setup_logging(self, log_level: str) -> None:
-        """Configura el sistema de logging."""
         logging.basicConfig(
             level=getattr(logging, log_level),
             format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
         )
     
-    def read_csv_file(self, file_path: str) -> Optional[pd.DataFrame]:
-        """
-        Lee un archivo CSV y lo convierte en DataFrame.
+    def clean_string(self, value) -> str:
+        """Limpia y convierte valores a string de manera segura."""
+        if pd.isna(value):  # Maneja NaN y None
+            return ""
+        return str(value).strip()
+
+    def clean_dataframe(self, df: pd.DataFrame) -> pd.DataFrame:
+        """Limpia el DataFrame convirtiendo valores a string donde sea necesario."""
+        df_clean = df.copy()
         
-        Args:
-            file_path: Ruta al archivo CSV
-            
-        Returns:
-            DataFrame con los datos del CSV o None si hay error
-        """
+        # Convertir columnas específicas a string
+        string_columns = ['email', 'Work Email', 'active', 'Employment Status']
+        for col in string_columns:
+            if col in df_clean.columns:
+                df_clean[col] = df_clean[col].apply(self.clean_string)
+        
+        return df_clean
+
+    def read_csv_file(self, file_path: str) -> Optional[pd.DataFrame]:
         try:
             self.logger.info(f"Leyendo archivo: {file_path}")
             df = pd.read_csv(file_path)
+            df = self.clean_dataframe(df)  # Limpiamos los datos
             self.logger.info(f"Archivo leído exitosamente. Registros: {len(df)}")
             return df
         except Exception as e:
             self.logger.error(f"Error al leer el archivo {file_path}: {str(e)}")
             return None
 
-    def validate_data(self, 
-                     ninjo_df: pd.DataFrame, 
-                     output_df: pd.DataFrame, 
-                     terminated_emails: set) -> Tuple[bool, str]:
-        """
-        Valida que el output contenga solo las nuevas bajas.
-        
-        Args:
-            ninjo_df: DataFrame original de Ninjo
-            output_df: DataFrame de salida
-            terminated_emails: Set de emails terminados
-            
-        Returns:
-            Tuple[bool, str]: (Es válido, Mensaje de error)
-        """
+    def validate_data(self, ninjo_df: pd.DataFrame, output_df: pd.DataFrame, terminated_emails: set) -> Tuple[bool, str]:
         try:
-            # 1. Verificar que no haya duplicados en el output
+            # 1. Verificar duplicados
             if output_df['email'].duplicated().any():
                 return False, "El output contiene emails duplicados"
 
-            # 2. Verificar que todos los registros del output estaban activos en Ninjo
+            # 2. Verificar usuarios previamente inactivos
             output_emails = set(output_df['email'].str.lower())
             ninjo_inactive = set(ninjo_df[ninjo_df['active'].str.upper() == 'FALSE']['email'].str.lower())
+            
             if overlap := output_emails.intersection(ninjo_inactive):
                 return False, f"El output contiene usuarios que ya estaban inactivos: {overlap}"
 
-            # 3. Verificar que todos los registros del output están en la lista de terminados
+            # 3. Verificar usuarios terminados
             if not_terminated := output_emails.difference(terminated_emails):
                 return False, f"El output contiene usuarios que no están en la lista de terminados: {not_terminated}"
 
-            # 4. Verificar que todos los campos requeridos están presentes
+            # 4. Verificar columnas requeridas
             required_columns = ['first_name', 'last_name', 'email', 'country', 'department', 
                               'branch', 'phone', 'manager', 'job_title', 'group', 'active']
             if missing := set(required_columns) - set(output_df.columns):
                 return False, f"Faltan columnas requeridas en el output: {missing}"
 
-            # 5. Verificar que todos los registros tienen 'FALSE' en active
+            # 5. Verificar valores active
             if not (output_df['active'] == 'FALSE').all():
                 return False, "Algunos registros no tienen 'FALSE' en el campo active"
 
-            # 6. Verificar que no hay valores nulos en campos críticos
+            # 6. Verificar valores nulos
             critical_fields = ['email', 'first_name', 'last_name', 'active']
             for field in critical_fields:
-                if output_df[field].isnull().any():
+                if output_df[field].isna().any():
                     return False, f"Hay valores nulos en el campo crítico: {field}"
 
             return True, "Validación exitosa"
-
         except Exception as e:
             return False, f"Error durante la validación: {str(e)}"
 
-    def process_files(self, 
-                     ninjo_file: str, 
-                     terminations_file: str, 
-                     output_file: str) -> bool:
-        """
-        Procesa los archivos de entrada y genera el archivo de salida.
-        
-        Args:
-            ninjo_file: Ruta al archivo de Ninjo
-            terminations_file: Ruta al archivo de terminaciones
-            output_file: Ruta donde se guardará el archivo de salida
-            
-        Returns:
-            bool: True si el proceso fue exitoso, False en caso contrario
-        """
+    def process_files(self, ninjo_file: str, terminations_file: str, output_file: str) -> bool:
         try:
-            # Leer archivos
+            # Leer y limpiar archivos
             ninjo_df = self.read_csv_file(ninjo_file)
             terminations_df = self.read_csv_file(terminations_file)
             
             if ninjo_df is None or terminations_df is None:
                 return False
             
-            # Obtener emails de usuarios terminados
+            # Crear set de emails terminados (ya limpios por clean_dataframe)
             terminated_emails = set(
                 terminations_df[
                     terminations_df['Employment Status'] == 'Terminated'
-                ]['Work Email'].str.lower().dropna()
+                ]['Work Email'].str.lower()
             )
             
-            # Normalizar datos de Ninjo
+            # Procesar datos de Ninjo (ya limpios por clean_dataframe)
             ninjo_df['email_lower'] = ninjo_df['email'].str.lower()
             ninjo_df['active_upper'] = ninjo_df['active'].str.upper()
             
@@ -141,27 +115,24 @@ class UserStatusProcessor:
             output_df = new_inactive[output_columns].copy()
             output_df['active'] = 'FALSE'
             
-            # Validar el output
-            is_valid, validation_message = self.validate_data(
-                ninjo_df, output_df, terminated_emails
-            )
-            
+            # Validar output
+            is_valid, validation_message = self.validate_data(ninjo_df, output_df, terminated_emails)
             if not is_valid:
                 self.logger.error(f"Error de validación: {validation_message}")
                 return False
             
-            # Registrar estadísticas antes de guardar
-            self.logger.info(f"Estadísticas de procesamiento:")
+            # Logging de estadísticas
+            self.logger.info("\nEstadísticas de procesamiento:")
             self.logger.info(f"- Total registros en Ninjo: {len(ninjo_df)}")
             self.logger.info(f"- Total usuarios terminados: {len(terminated_emails)}")
             self.logger.info(f"- Usuarios ya inactivos en Ninjo: {len(ninjo_df[ninjo_df['active_upper'] == 'FALSE'])}")
             self.logger.info(f"- Nuevos usuarios a inactivar: {len(output_df)}")
             
-            # Generar archivo de salida
+            # Generar archivo
             output_df.to_csv(output_file, index=False)
             self.logger.info(f"Archivo de salida generado exitosamente: {output_file}")
             
-            # Mostrar ejemplos de registros procesados
+            # Mostrar ejemplos
             if len(output_df) > 0:
                 self.logger.info("\nEjemplos de registros a inactivar:")
                 for _, row in output_df.head(3).iterrows():
@@ -174,16 +145,13 @@ class UserStatusProcessor:
             return False
 
 def main():
-    # Configurar rutas de archivos
     current_date = datetime.now().strftime("%Y%m%d")
-    ninjo_file = "NinjoEmployees export.csv"
-    terminations_file = f"{current_date}_81OP_Terminations_All_Countries_Clara 1.csv"
+    ninjo_file = "Ninjo-Employees-export.csv"
+    terminations_file = f"{current_date}_81OP_Terminations_All_Countries_Clara.csv"
     output_file = f"{current_date}_users_to_inactivate.csv"
     
-    # Crear instancia del procesador
     processor = UserStatusProcessor(log_level="INFO")
     
-    # Procesar archivos
     success = processor.process_files(
         ninjo_file=ninjo_file,
         terminations_file=terminations_file,
